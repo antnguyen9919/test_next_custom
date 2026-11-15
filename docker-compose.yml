@@ -1,0 +1,99 @@
+# Entry point for the whole stack. Only `gateway` publishes a port; the outer
+# (devops) nginx proxies to it and never sees the services behind it.
+#
+# One compose project per environment, each with its own network, Redis and port:
+#   docker compose -p next-prod --env-file deploy/prod.env up -d --build --wait
+#   docker compose -p next-dev  --env-file deploy/dev.env  up -d --build --wait
+# Plain `docker compose up -d --build --wait` uses the defaults below (:8080).
+name: next-stack
+
+x-health: &health
+  interval: 10s
+  timeout: 3s
+  retries: 5
+  start_period: 10s
+
+# Defaults to the Redis inside this stack (fine when all replicas of an
+# environment run on one Docker host). If replicas span several VMs, point every
+# stack of the same environment at ONE shared Redis instead.
+x-redis-env: &redis-env
+  REDIS_URL: ${REDIS_URL:-redis://redis:6379}
+
+services:
+  gateway:
+    build: ./gateway
+    ports:
+      - "${GATEWAY_BIND:-127.0.0.1}:${GATEWAY_PORT:-8080}:8080"
+    # No depends_on: upstreams are resolved per request (round-robin over all
+    # replicas), so the gateway starts alone and a down service is a 502 on its prefix only.
+    restart: unless-stopped
+    healthcheck:
+      <<: *health
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/gateway/health"]
+
+  web:
+    build: .
+    deploy:
+      replicas: ${WEB_REPLICAS:-2}
+    environment:
+      <<: *redis-env
+      # Server-side only (internal network). Never NEXT_PUBLIC_: the browser uses relative URLs.
+      API_URL: http://api:4000
+      PY_URL: http://py:8000
+    depends_on:
+      redis: { condition: service_healthy }
+    restart: unless-stopped
+    healthcheck:
+      <<: *health
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
+
+  api:
+    build:
+      context: .
+      dockerfile: services/api/Dockerfile
+    deploy:
+      replicas: ${API_REPLICAS:-2}
+    environment:
+      <<: *redis-env
+      PY_URL: http://py:8000
+    depends_on:
+      redis: { condition: service_healthy }
+    restart: unless-stopped
+    healthcheck:
+      <<: *health
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4000/hono/health').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
+
+  py:
+    build: ./services/py
+    deploy:
+      replicas: ${PY_REPLICAS:-2}
+    restart: unless-stopped
+    healthcheck:
+      <<: *health
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/py/health', timeout=2)"]
+
+  # BullMQ consumer. Same image as `py`, different process; not reachable over HTTP.
+  worker:
+    build: ./services/py
+    command: ["python", "worker.py"]
+    deploy:
+      replicas: ${WORKER_REPLICAS:-2}
+    environment:
+      <<: *redis-env
+    depends_on:
+      redis: { condition: service_healthy }
+    restart: unless-stopped
+    stop_grace_period: 30s # let in-flight jobs finish
+
+  redis:
+    image: redis:8-alpine
+    # AOF so queued jobs survive a Redis restart.
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes: ["redis-data:/data"]
+    restart: unless-stopped
+    healthcheck:
+      <<: *health
+      test: ["CMD", "redis-cli", "ping"]
+
+volumes:
+  redis-data:

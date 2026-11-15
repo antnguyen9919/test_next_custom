@@ -1,0 +1,25 @@
+# ${VARS} are filled from env by the nginx image at startup (envsubst);
+# lowercase $vars are nginx's own.
+server {
+  listen 8080;
+
+  set $web_upstream ${WEB_UPSTREAM};
+  set $api_upstream ${API_UPSTREAM};
+  set $py_upstream  ${PY_UPSTREAM};
+
+  # Ask any outer nginx not to buffer (it honours this response header).
+  add_header X-Accel-Buffering no always;
+
+  location = /gateway/health { access_log off; default_type text/plain; return 200 "ok\n"; }
+
+  # Node service (Hono): HTTP, SSE, WebSocket
+  location = /hono { proxy_pass $api_upstream; }
+  location /hono/  { proxy_pass $api_upstream; }
+
+  # Python service (FastAPI): HTTP, SSE, WebSocket
+  location = /py   { proxy_pass $py_upstream; }
+  location /py/    { proxy_pass $py_upstream; }
+
+  # Everything else, including Next's HMR websocket in dev
+  location /       { proxy_pass $web_upstream; }
+}

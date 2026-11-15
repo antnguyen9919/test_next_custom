@@ -1,0 +1,31 @@
+# Dev: same topology as production, but the gateway points at `next dev`
+# running on the host (HMR goes through the gateway too).
+#
+#   terminal 1: pnpm dev                (Next on :3000, reads .env.development)
+#   terminal 2: pnpm dev:stack          (gateway + api + py + worker + redis, rebuilt on change)
+#   open http://localhost:8090
+services:
+  gateway:
+    environment:
+      WEB_UPSTREAM: http://host.docker.internal:3000
+    extra_hosts: ["host.docker.internal:host-gateway"]
+
+  # Published so `next dev` on the host can reach them server-side.
+  api:
+    deploy: { replicas: 1 } # a fixed host port allows one replica
+    ports: ["127.0.0.1:4000:4000"]
+    develop:
+      watch:
+        - { path: ./services/api, action: rebuild }
+  py:
+    deploy: { replicas: 1 }
+    ports: ["127.0.0.1:8000:8000"]
+    develop:
+      watch:
+        - { path: ./services/py, action: rebuild }
+  worker:
+    develop:
+      watch:
+        - { path: ./services/py, action: rebuild }
+  redis:
+    ports: ["127.0.0.1:6379:6379"]
